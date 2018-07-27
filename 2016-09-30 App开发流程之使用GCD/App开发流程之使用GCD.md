@@ -22,7 +22,7 @@ GCD即为Grand Central Dispatch的缩写，是一种主要用于异步处理任�
 
 6. 串行队列：主要指队列中多个任务只能依次执行。
 
-## 常见的重要方法1
+## 常见的重要系列方法1
 
 逐个记录重要的方法：
 
@@ -230,16 +230,24 @@ dispatch_async(customConcurrentQueue, ^{
 
 5. 多个嵌套的异步执行并行队列，可能使用已存在的闲置线程
 
-## 常见的重要方法2
+## 常见的重要系列方法2
 
 ### ```void dispatch_barrier_async(dispatch_queue_t queue, dispatch_block_t block);```
 
-该方法与dispatch_async类似，将block加入队列异步执行。注意当轮到该block执行时候，唯一异步执行，执行完毕后才会执行其他任务。所以只有加入并行队列，该方法才有意义。特别适用于加锁操作。
+该方法与dispatch_async类似，将block加入队列异步执行。注意当先加入队列的任务都执行完后，才轮到该block执行，唯一异步执行，执行完毕后才会执行其他任务。所以只有加入并行队列，该方法才有意义。特别适用于加锁操作。
+
+### ```void dispatch_barrier_sync(dispatch_queue_t queue, DISPATCH_NOESCAPE dispatch_block_t block);```
+
+该方法与dispatch_sync类似，将block加入队列同步执行。注意当先加入队列的任务都执行完后，才轮到该block执行，唯一同步执行，执行完毕后才会执行其他任务。所以只有加入并行队列，该方法才有意义。特别适用于加锁操作。
+
+### 上述两者不同的地方
+
+```dispatch_barrier_async```函数会先将后续代码中的任务加入队列，只是控制任务的执行顺序；```dispatch_barrier_sync```函数要求指定的任务执行完毕后，才将后续代码中的任务加入队列并执行。
 
  
 ### ```void dispatch_after(dispatch_time_t when, dispatch_queue_t queue, dispatch_block_t block);```
 
-将block将入队列，延迟一定时间后异步执行。
+将block加入队列，延迟一定时间后异步执行。
 
 #### 使用示例：
 
@@ -255,7 +263,7 @@ dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)), 
 
 ### ```void dispatch_apply(size_t iterations, dispatch_queue_t queue, void (^block)(size_t));```
 
-将block加入队列指定次数。队列可以是并行的，所以block执行可以为并行。size_t表示加入时的索引。
+将block加入队列指定次数。队列可以是并行的，所以block执行可以为并行。iterations表示循环总次数。
 
 #### 测试代码：
 
@@ -293,6 +301,8 @@ dispatch_once(&onceToken, ^{
 
 });
 ```
+
+## 常见的重要系列方法3
 
 ### ```void dispatch_group_async(dispatch_group_t group, dispatch_queue_t queue, dispatch_block_t block);```
 
@@ -338,5 +348,161 @@ dispatch_group_notify(group, globalQueue, ^{
 2016-09-30 17:19:15.490 base[33322:8718098] dispatch_group_async : 4
 2016-09-30 17:19:15.491 base[33322:8718098] dispatch_group_async : completion
 ```
+
+### ```void dispatch_group_enter(dispatch_group_t group);```
+### ```void dispatch_group_leave(dispatch_group_t group);```
+
+虽然上面的例子，没有使用enter和leave函数，也实现了group的效果，但是继续看下面的例子：
+
+```
+dispatch_group_t group = dispatch_group_create();
+    
+dispatch_group_async(group, globalQueue, ^{
+    LOG(@"dispatch_group_async : 1");
+    dispatch_async(globalQueue, ^{
+        LOG(@"dispatch_group_async : 5");
+    });
+    
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        LOG(@"dispatch_group_async : 6");
+    });
+});
+    
+dispatch_group_async(group, globalQueue, ^{
+    LOG(@"dispatch_group_async : 2");
+});
+    
+dispatch_group_async(group, globalQueue, ^{
+    LOG(@"dispatch_group_async : 3");
+});
+    
+dispatch_group_async(group, globalQueue, ^{
+    LOG(@"dispatch_group_async : 4");
+});
+    
+dispatch_group_notify(group, globalQueue, ^{
+    LOG(@"dispatch_group_async : completion");
+});
+```
+
+```
+2018-07-27 14:11:00.706103+0800 base[96150:18276013] dispatch_group_async : 1
+2018-07-27 14:11:00.706116+0800 base[96150:18276012] dispatch_group_async : 2
+2018-07-27 14:11:00.706131+0800 base[96150:18276011] dispatch_group_async : 3
+2018-07-27 14:11:00.706138+0800 base[96150:18276005] dispatch_group_async : 4
+2018-07-27 14:11:00.706261+0800 base[96150:18276011] dispatch_group_async : 5
+2018-07-27 14:11:00.706337+0800 base[96150:18276005] dispatch_group_async : completion
+2018-07-27 14:11:02.899388+0800 base[96150:18275683] dispatch_group_async : 6
+```
+
+这个时候就可以看出问题所在了，常见的业务场景是异步发出网络请求，请求完成后，再整合多个网络请求的结果。
+
+我们加上enter和leave函数后的例子如下：
+
+```
+dispatch_group_t group = dispatch_group_create();
+    
+    dispatch_group_enter(group);
+    dispatch_group_async(group, globalQueue, ^{
+        LOG(@"dispatch_group_async : 1");
+        dispatch_async(globalQueue, ^{
+            LOG(@"dispatch_group_async : 5");
+        });
+        
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            LOG(@"dispatch_group_async : 6");
+            dispatch_group_leave(group);
+        });
+    });
+    
+    dispatch_group_async(group, globalQueue, ^{
+        LOG(@"dispatch_group_async : 2");
+    });
+    
+    dispatch_group_async(group, globalQueue, ^{
+        LOG(@"dispatch_group_async : 3");
+    });
+    
+    dispatch_group_async(group, globalQueue, ^{
+        LOG(@"dispatch_group_async : 4");
+    });
+    
+    dispatch_group_notify(group, globalQueue, ^{
+        LOG(@"dispatch_group_async : completion");
+    });
+```
+
+```
+2018-07-27 14:15:10.364236+0800 base[96804:18308781] dispatch_group_async : 1
+2018-07-27 14:15:10.364245+0800 base[96804:18308794] dispatch_group_async : 2
+2018-07-27 14:15:10.364272+0800 base[96804:18308793] dispatch_group_async : 3
+2018-07-27 14:15:10.364285+0800 base[96804:18308785] dispatch_group_async : 4
+2018-07-27 14:15:10.364425+0800 base[96804:18308795] dispatch_group_async : 5
+2018-07-27 14:15:12.555604+0800 base[96804:18308555] dispatch_group_async : 6
+2018-07-27 14:15:12.555824+0800 base[96804:18308795] dispatch_group_async : completion
+```
+
+所以，建议组合使用dispatch_group的enter和leave函数，达到理想的效果。需要特别注意：enter和leave函数必须成对使用，避免notify函数不被调用。
+
+## 常见的重要系列方法4
+
+### ```dispatch_semaphore_t dispatch_semaphore_create(long value);```
+
+信号灯函数主要是用于控制最大并发任务数量的场景。create函数的value参数，表示最大并发数。
+
+```
+dispatch_semaphore_t semaphore = dispatch_semaphore_create(2);
+    
+dispatch_async(globalQueue, ^{
+    dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+    
+    LOG(@"dispatch_semaphore_t : 1");
+    
+    dispatch_semaphore_signal(semaphore);
+});
+    
+dispatch_async(globalQueue, ^{
+    dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+
+    LOG(@"dispatch_semaphore_t : 2");
+    
+    dispatch_semaphore_signal(semaphore);
+});
+    
+dispatch_async(globalQueue, ^{
+    dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+    
+    LOG(@"dispatch_semaphore_t : 3");
+    
+    dispatch_semaphore_signal(semaphore);
+});
+    
+dispatch_async(globalQueue, ^{
+    dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+    
+    LOG(@"dispatch_semaphore_t : 4");
+    
+    dispatch_semaphore_signal(semaphore);
+});
+```
+
+```
+2018-07-27 14:46:24.027042+0800 base[1135:18552033] dispatch_semaphore_t : 1
+2018-07-27 14:46:24.027045+0800 base[1135:18550052] dispatch_semaphore_t : 2
+2018-07-27 14:46:24.027207+0800 base[1135:18552006] dispatch_semaphore_t : 4
+2018-07-27 14:46:24.027209+0800 base[1135:18553145] dispatch_semaphore_t : 3
+```
+
+上面的log其实并没有绝对说服力，因为信号灯只是控制最大并发数量，并不能完全控制执行顺序。唯一能确定的是：任务3和4一定晚于任务1和2执行，因为队列是FIFO的。
+
+### ```long dispatch_semaphore_wait(dispatch_semaphore_t dsema, dispatch_time_t timeout);```
+
+该函数用于等待指定的信号灯dsema，如果信号值为0，则该线程处于等待状态；如果信号值大于0，则将信号值-1，执行后续任务。
+
+timeout参数表示等待时间，可以选择```DISPATCH_TIME_FOREVER```。
+
+### ```long dispatch_semaphore_signal(dispatch_semaphore_t dsema);```
+
+该函数用于将信号值+1，并发出信号，唤醒一个处于等待同一个信号灯状态的线程。
 
 以上记录了GCD的常见使用方法和示例代码。
